@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## 3.17.6 - unreleased
+## 3.17.6 - 2026-08-10
 
 - Fixed issue #1092, where the encoder ActiveSupport 8.1 caches with `escape: false` froze the options as they stood before `set_encoder` wrote `time_precision` into them, so `to_json(escape: false)` emitted 9 fractional digits. An options hash that names no option Oj knows no longer detaches an encoder from the defaults. (#1093)
 
