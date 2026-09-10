@@ -1241,45 +1241,84 @@ static bool parse_one_option(VALUE k, VALUE v, Options copts) {
     return true;
 }
 
-// Collects the return of parse_one_option() over every key in a hash.
+// Collects the results of parse_one_option() over every key in a hash.
 struct _optsParse {
     Options copts;
-    bool    consumed;
+    bool    consumed;  // some key was an Oj option
+    VALUE   orig;      // the caller's hash, never modified
+    VALUE   rest;      // orig, or a copy of it without the Oj options
 };
+
+static void drop_from_rest(struct _optsParse *op, VALUE k) {
+    if (op->rest == op->orig) {
+        op->rest = rb_hash_dup(op->orig);
+    }
+    rb_hash_delete(op->rest, k);
+}
 
 static int parse_options_cb(VALUE k, VALUE v, VALUE opts) {
     struct _optsParse *op = (struct _optsParse *)opts;
 
     if (parse_one_option(k, v, op->copts)) {
         op->consumed = true;
+        // :only and :except are also read by ActiveSupport's as_json, which
+        // compat mode reaches through to_json, so they are left in.
+        if (only_sym != k && except_sym != k) {
+            drop_from_rest(op, k);
+        }
     }
     return ST_CONTINUE;
 }
 
-// Apply the options in ropts to copts and report whether any key was
-// recognized. A hash of nothing but unknown keys leaves copts untouched and
-// returns false.
-bool oj_parse_options_consumed(VALUE ropts, Options copts) {
-    struct _optsParse op = {copts, false};
+static void parse_options(VALUE ropts, Options copts, struct _optsParse *op) {
+    op->copts    = copts;
+    op->consumed = false;
+    op->orig     = ropts;
+    op->rest     = ropts;
 
     if (T_HASH != rb_type(ropts)) {
-        return false;
+        return;
     }
-    rb_hash_foreach(ropts, parse_options_cb, (VALUE)&op);
+    rb_hash_foreach(ropts, parse_options_cb, (VALUE)op);
     if (Qnil != rb_hash_lookup(ropts, match_string_sym)) {
-        op.consumed = true;
+        op->consumed = true;
+        drop_from_rest(op, match_string_sym);
     }
     oj_parse_opt_match_string(&copts->str_rx, ropts);
 
     copts->dump_opts.use = (0 < copts->dump_opts.indent_size || 0 < copts->dump_opts.after_size ||
                             0 < copts->dump_opts.before_size || 0 < copts->dump_opts.hash_size ||
                             0 < copts->dump_opts.array_size);
+}
+
+// Apply the options in ropts to copts and report whether any key was
+// recognized. A hash of nothing but unknown keys leaves copts untouched and
+// returns false.
+bool oj_parse_options_consumed(VALUE ropts, Options copts) {
+    struct _optsParse op;
+
+    parse_options(ropts, copts, &op);
 
     return op.consumed;
 }
 
+// Apply the options in ropts to copts and return what is left for the
+// to_json and as_json methods that Oj.dump() calls: ropts itself when it
+// holds no Oj option, otherwise a copy without them. The json gem's
+// generator raises on options it does not know as of json 3.0, so Oj's own
+// must not reach it. ropts is never modified.
+VALUE oj_parse_options_rest(VALUE ropts, Options copts) {
+    struct _optsParse op;
+
+    parse_options(ropts, copts, &op);
+
+    return op.rest;
+}
+
 void oj_parse_options(VALUE ropts, Options copts) {
-    oj_parse_options_consumed(ropts, copts);
+    struct _optsParse op;
+
+    parse_options(ropts, copts, &op);
 }
 
 // Free the option buffers that oj_parse_options() allocated for a single call.
@@ -1703,6 +1742,7 @@ static VALUE dump(int argc, VALUE *argv, VALUE self) {
     struct dump_arg arg;
     struct _out     out;
     struct _options copts = oj_default_options;
+    VALUE           to_json_argv[2];
 
     if (1 > argc) {
         rb_raise(rb_eArgError, "wrong number of arguments (0 for 1).");
@@ -1711,7 +1751,11 @@ static VALUE dump(int argc, VALUE *argv, VALUE self) {
         copts.dump_opts.nan_dump = WordNan;
     }
     if (2 == argc) {
-        oj_parse_options(argv[1], &copts);
+        // The options hash is also what to_json and as_json receive, so
+        // hand them the hash without the options Oj itself acted on.
+        to_json_argv[0] = argv[0];
+        to_json_argv[1] = oj_parse_options_rest(argv[1], &copts);
+        argv            = to_json_argv;
     }
     if (CompatMode == copts.mode && copts.escape_mode != ASCIIEsc) {
         copts.escape_mode = JSONEsc;

@@ -46,6 +46,15 @@ class CompatJuice < Minitest::Test
     end
   end # Argy
 
+  class ArgKeeper
+    attr_reader :args
+
+    def to_json(*a)
+      @args = a
+      '{}'
+    end
+  end # ArgKeeper
+
   class Rex
     attr_accessor :s
 
@@ -571,6 +580,48 @@ class CompatJuice < Minitest::Test
   def test_arg_passing
     json = Oj.to_json(Argy.new(), :max_nesting => 40)
     assert_match(/.*max_nesting.*40.*/, json)
+  end
+
+  # Oj.dump forwards its options hash to to_json. The json gem's generator
+  # raises on keys it does not know as of json 3.0, so the options Oj acted
+  # on must not reach it. Keys Oj does not know are passed through untouched.
+  def test_dump_to_json_args_omit_oj_options
+    keeper = ArgKeeper.new
+    opts = { :mode => :compat, :use_to_json => true, :time_format => :ruby, :indent => 2, :allow_nan => true, :custom => 1 }
+    Oj.dump(keeper, opts)
+    assert_equal([{ :custom => 1 }], keeper.args)
+    # The caller's hash is left alone.
+    assert_equal({ :mode => :compat, :use_to_json => true, :time_format => :ruby, :indent => 2, :allow_nan => true, :custom => 1 }, opts)
+  end
+
+  # ActiveSupport's as_json reads :only and :except and compat mode reaches
+  # it through to_json, so those two stay in even though Oj knows them.
+  def test_dump_to_json_args_keep_only_and_except
+    keeper = ArgKeeper.new
+    Oj.dump(keeper, :mode => :compat, :use_to_json => true, :only => [:x], :except => [:y], :root => true)
+    assert_equal([{ :only => [:x], :except => [:y], :root => true }], keeper.args)
+  end
+
+  def test_dump_to_json_args_same_hash_without_oj_options
+    Oj.default_options = { :mode => :compat, :use_to_json => true }
+    keeper = ArgKeeper.new
+    opts = { :custom => 1 }
+    Oj.dump(keeper, opts)
+    assert_same(opts, keeper.args[0])
+  end
+
+  # Nested values are handed to to_json whether or not use_to_json is set,
+  # so the options they receive have to be cleaned up as well.
+  def test_dump_to_json_args_nested_without_use_to_json
+    keeper = ArgKeeper.new
+    Oj.dump([keeper], :mode => :compat, :time_format => :ruby, :custom => 1)
+    assert_equal([{ :custom => 1 }], keeper.args)
+  end
+
+  def test_dump_to_json_args_custom_mode
+    keeper = ArgKeeper.new
+    Oj.dump(keeper, :mode => :custom, :use_to_json => true, :omit_nil => true, :custom => 1)
+    assert_equal([{ :custom => 1 }], keeper.args)
   end
 
   def test_max_nesting
